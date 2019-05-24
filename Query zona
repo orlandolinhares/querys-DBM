@@ -1,0 +1,769 @@
+----------------------------------------------------------------
+--- BUSCA CPF POR CONTA-CARTAO + 4 ULTIMOS DIGITOS DO CARTÃO ---
+--- FILTRA TRANSACIONAL	----------------------------------------
+----------------------------------------------------------------
+--- BUSCA CPF COM CONTA + ULTIMOS DIGITOS DO CARTÃO ---
+
+SELECT 
+DISTINCT
+D.CPF,
+C.NUM_CAR_CRD,
+C.CARTAO
+INTO -- DROP TABLE
+##BASE_ABORDADA
+FROM
+[##1808232787500]	A
+INNER JOIN
+DBM_TB_DADOSCONTA	B WITH(NOLOCK) ON A.[Column 5] /* CHAVE CONTA */ = B.NUM_CNT_CAR
+INNER JOIN
+DBM_TB_DADOSCARTAO	C WITH(NOLOCK) ON LTRIM(RTRIM(A.[Column 3])) = right(C.CARTAO,4)	
+									  AND
+									  B.CD_CONTA	= C.CD_CONTA
+INNER JOIN
+DBM_TB_DADOSCLIENTE	D WITH(NOLOCK) ON C.CD_CLIENTE	= D.CD_CLIENTE
+
+--- FILTRA TRANSACIONAL ---
+SELECT 
+		CARTAO_NC,
+		VL_TRANS
+INTO -- DROP TABLE
+##BASE_TRANSACIONADA -- 11.596.575
+FROM
+DBM_VW_TRANS
+WHERE
+DT_REF_TRANS	BETWEEN '2018-08-24' AND '2018-08-28'
+
+
+--- AGRUPA TRANSAÇÃO SUPERIR A 80 ---
+SELECT
+		CARTAO_NC,
+		SUM(VL_TRANS)	VL_TRANS 
+INTO -- DROP TABLE
+##BASE_TRANSACIONADA_2
+FROM 
+##BASE_TRANSACIONADA
+GROUP BY
+CARTAO_NC
+HAVING
+SUM(VL_TRANS) >= 80
+
+-- BASE FINAL 
+SELECT
+LTRIM(RTRIM(A.CPF))+';'+'40'
+FROM
+##BASE_ABORDADA	A
+INNER JOIN
+##BASE_TRANSACIONADA_2 B ON A.NUM_CAR_CRD = B.CARTAO_NC -- CARTÃO NC É CARTÃO CRIPTOGRAFADO DO DBM
+
+----------------------------------------------------------------
+--- BUSCA DEMANDA POR NOME DE SOLICITANTE ----------------------
+----------------------------------------------------------------
+
+SELECT 
+* 
+FROM 
+DBM_TB_ATIVIDADES WITH(NOLOCK) 
+WHERE 
+--SOLICITANTE LIKE '%aline%' -- ALTERAR AQUI
+--AND
+--AREA		= 'PJ'
+--AND
+--ANALISTA	LIKE '%ORLANDO%'
+--AND
+--ATIVIDADE	= '%FIDELIZE%'
+JOB = '6600'
+ORDER BY 
+JOB 
+DESC
+
+----------------------------------------------------------------
+-----STATUS NA BASE_CAMP ---------------------------------------
+----------------------------------------------------------------
+/*
+	O campo “status” da basecamp agora possui 3 flags diferentes:
+
+	‘desb.’ Para contas cartão desbloqueadas (branco)
+	‘bloq.’ Para contas cartão com bloqueio de transito (“xw”)
+	‘temp.’ Para contas cartão com bloqueio temporário por cobrança e suspeita de fraude(“XS”,”C”)
+
+	Os dois últimos eram agrupados, mas houve necessidade de desmembramento.
+
+	A informação estará disponível após a próxima atualização.
+*/
+
+---------------------------
+--- ANUIDADE POR CARTÃO ---
+---------------------------
+
+SELECT 
+CD_CARTAO,
+SUM(VL_TRANS)	VL_TRANS	-- 155.792.105.27 
+INTO
+#TMP_ANUIDADE
+FROM 
+BBCD000.dbo.DBM_TB_ANUIDADE	WITH(NOLOCK)
+WHERE
+CONVERT(VARCHAR(6),DT_TRANSAC,112) = '201807'
+GROUP BY
+CD_CARTAO
+
+
+SELECT
+B.CARTAO,
+VL_TRANS
+INTO
+#TMP_ANUIDADE_2
+FROM
+#TMP_ANUIDADE					A
+INNER JOIN
+BBCD000.dbo.DBM_TB_DADOSCARTAO	B WITH(NOLOCK) ON A.CD_CARTAO = B.CD_CARTAO
+
+
+SELECT 
+DISTINCT
+NUM_CNT_CAR,
+CARTAO,
+DT_PRIUSO,
+FL_STATUS,
+FRM_PGT_ATU
+INTO -- DROP TABLE
+#FL_STATUS -- (13.716.703)
+FROM
+BBCD000.dbo.DBM_TB_BASECAMP
+WHERE
+FL_STATUS IN ('BLOQ.','DESB.')
+
+
+SELECT
+A.NUM_CNT_CAR,
+A.CARTAO,
+A.FL_STATUS,
+A.FRM_PGT_ATU,
+CASE WHEN A.DT_PRIUSO IS NOT NULL THEN 1 ELSE 0 END FLAG_ATV,
+B.VL_TRANS
+INTO -- drop table
+#TB2 -- (13.716.703 row(s) affected)
+FROM
+#FL_STATUS			A
+LEFT JOIN
+#TMP_ANUIDADE_2		B	ON A.CARTAO = B.CARTAO
+
+
+SELECT
+FLAG_ATV,
+FL_STATUS,
+FRM_PGT_ATU,
+COUNT(DISTINCT(CARTAO))			QTD_CARTAO,
+SUM(ISNULL(VL_TRANS,0))			VLR_ANU
+FROM
+#TB2
+GROUP BY
+FLAG_ATV,
+FL_STATUS,
+FRM_PGT_ATU
+
+----------------------------------------------------------
+--- SELECIONA BASE DUPLICADA POR VARIÁVEL ESPECIFICADA ---
+----------------------------------------------------------
+
+SELECT 
+* 
+FROM 
+#TABELA
+WHERE
+X IN
+(
+SELECT X FROM #TB2 GROUP BY X HAVING COUNT(X) > 1
+)
+ORDER BY
+X
+
+-----------------------------------------
+--- SUBSTRING COM BUSCA POR CARACTERE ---
+-----------------------------------------
+
+SUBSTRING(CAMPO,CHARINDEX('DIGITE O CARACTERE A SER BUSCADO',CAMPO,1)+1,16) VARIAVEL
+
+------------------------------------------------------
+--- BASE DE CLIENTES QUE DESBLOQUEARAM VIA APP BBC ---
+------------------------------------------------------
+--- Base de clientes desbloqueados pelo APP:
+	/*
+	DBM_TB_DESBAPP
+
+	CPF
+	CORRENTISTA
+	TITULARIDADE
+	BANDEIRA
+	INI_CARTAO
+	FIM_CARTAO
+	ARQUIVO
+	DT_DESB
+	SMS
+	EMAIL
+	
+	Atualizada todo dia (desde que a area do APP disponibilize o arquivo)
+	*/
+
+--------------------------------------
+---- CRÉDITO PURO NÃO CORRENSTITA ----
+--------------------------------------
+---- clientes não correntistas visa: (161.354 row(s) affected)
+
+	SELECT 
+	DISTINCT
+	CPF_CNPJ,
+	A.NUM_CNT_CAR,
+	CARTAO
+	INTO -- drop table 
+	#N_CORR
+			FROM
+			BBCD000.dbo.DBM_TB_BASECAMP		A	WITH(NOLOCK)
+			INNER JOIN
+			BBCD000.dbo.DBM_TB_PRODUTO		B	WITH(NOLOCK)	
+												ON 
+												A.COD_PRD = B.CD_PRODUTO
+												AND
+												B.BANDEIRA IN ('VISA')
+												AND
+												A.DS_SEGMT = 'N/D'
+																										
+--- deleta cartões multiplos
+	
+	DELETE FROM #N_CORR 
+	WHERE CARTAO IN (SELECT CARTAO FROM DBM_TB_DEBITOCARTAO WITH(NOLOCK)) -- (5.098 row(s) affected)
+	
+-------------------------------------------
+---- MÉTRICAS DE DESBLOQUEIO POR CONTA ----
+-------------------------------------------	
+/*	
+BBCD000.dbo.DBM_TB_STATUS_CONTA
+	DT_DESB
+	DT_PRIUSO
+	DT_ULTUSO
+	DT_CANC
+	CD_MIGR
+	VL_TRANS_06M
+	VL_TRANS_12M
+	NUM_CNT_CAR
+	VL_TRANS_01M
+	VL_TRANS_03M
+*/
+
+---------------------------------------------------------------------------------------------------------------------------------
+---- A tabela consolida as contas selecionadas para as ações de upgrade prime (com e sem oferta) e as ações de aumento de gastos
+---- Filtrar de acordo coma  oferta dos briefings que vieram (e virão)
+---------------------------------------------------------------------------------------------------------------------------------		
+/*
+DBM_TB_ACAO_AUMENTO_GASTOS
+*/
+
+-------------------------------
+---- Sequencial automático ----
+-------------------------------
+
+DECLARE @SEQ_ARQUIVO SMALLINT
+SET		@SEQ_ARQUIVO = (SELECT 1)
+
+--drop table ##AETERNUM
+DECLARE @QUERY VARCHAR(MAX)
+SET		@QUERY = 
+'
+CREATE TABLE ##TABELA_TESTE
+(
+ CPF_CNPJ			VARCHAR(14),
+ IDENT INT IDENTITY ('+ CAST(@SEQ_ARQUIVO AS VARCHAR)+',1)
+)
+'
+EXEC(@QUERY)
+
+INSERT INTO ##TABELA_TESTE 
+SELECT 
+	TOP 10
+	CPF_CNPJ
+FROM 
+	BBCD000.DBO.DBM_TB_BASECAMP
+	
+-------------------------
+---- BUSCA ATIVIDADE ----
+-------------------------
+	
+SELECT 
+* 
+FROM 
+DBM_TB_ATIVIDADES WITH(NOLOCK) 
+WHERE 
+--SOLICITANTE LIKE '%Ingrid%' 
+--AND 
+--ATIVIDADE	LIKE '%RASTR%'
+--ANALISTA LIKE '%Orlando%'
+canal = '04 - TELEMARKETING ATIVO'
+ORDER BY 
+JOB 
+DESC	
+
+-------------------------
+---- BUSCA FONÉTICA -----
+-------------------------
+
+DECLARE @MES_REF VARCHAR(6)
+SET		@MES_REF = '201806'
+
+SELECT 
+	CD_CARTAO, MES_REF, VL_CVT_TRANS, 
+	'LOOKE' AS ESTAB
+FROM
+	DBM_VW_TRANS AS A WITH(NOLOCK)
+INNER JOIN
+	DBM_TB_DADOSCARTAO AS B WITH(NOLOCK)
+	ON A.CARTAO_NC = B.NUM_CAR_CRD
+WHERE (NM_ESTAB LIKE '% LOOKE%' OR NM_ESTAB LIKE '%*LOOKE%')
+AND 
+MES_REF = @MES_REF
+
+-------------------------------------------
+--- VERIFICA CLIENTE ABORDADO HISTÓRICO ---
+-------------------------------------------
+
+SELECT 
+DISTINCT
+C.CPF,
+A.NUM_CNT_CAR,
+LEFT(F.CARTAO,6)+'******'+RIGHT(F.CARTAO,5)	CARTAO,
+E.CD_PRODUTO,
+E.NOME_PRODUTO,
+D.CD_CAMPANHA,
+D.CD_LOTE,
+D.OBS,
+D.CD_CANAL,
+D.DT_INCLUSAO
+FROM
+DBM_VW_HISTCAMP					A
+INNER JOIN
+BBCD000.dbo.DBM_TB_DADOSCONTA	B	WITH(NOLOCK) ON A.NUM_CNT_CAR		= B.NUM_CNT_CAR
+INNER JOIN
+BBCD000.dbo.DBM_TB_DADOSCLIENTE	C	WITH(NOLOCK) ON B.CD_CLIENTE_TTLAR	= C.CD_CLIENTE
+													AND 
+													C.CPF				IN (SELECT CPF FROM ##PROCON)
+INNER JOIN
+BBCD000.dbo.DBM_TB_LOTECAMPANHA D	WITH(NOLOCK) ON A.CD_LOTE			= D.CD_LOTE	AND D.STATUSS = 'X'
+INNER JOIN
+BBCD000.dbo.DBM_TB_PRODUTO		E	WITH(NOLOCK) ON B.CD_PRODUTO		= E.CD_PRODUTO
+INNER JOIN
+BBCD000.dbo.DBM_TB_DADOSCARTAO	F	WITH(NOLOCK) ON B.CD_CONTA			= F.CD_CONTA
+
+--------------------------------------------------------------------
+--- CONTAS CARTÃO QUE NÃO ROTATIVARAM SUA FATURA NO MÊS ANTERIOR ---
+--------------------------------------------------------------------	
+
+SELECT
+		CONTA,
+		DT_VCTO
+INTO 
+		##ELEG
+FROM 
+		DBM_VW_FATURA
+WHERE 
+		MES_REF		= 'digitar aqui o mês atual' 
+		AND  
+		VL_SALDOANT = VL_PGANT 	
+				
+---------------------------------------------------------------
+-- A tabela consolida as contas selecionadas para as ações de upgrade prime (com e sem oferta) e as ações de aumento de gastos
+-- Filtrar de acordo coma  oferta dos briefings que vieram (e virão)
+---------------------------------------------------------------			
+		
+SELECT 
+* 
+FROM 
+BBCD000.dbo.DBM_TB_ACAO_AUMENTO_GASTOS WITH(NOLOCK)
+
+----------------------------------------
+-- Seleciona cidades por busca fonética 
+----------------------------------------
+
+CREATE TABLE ##TB
+(
+	ID INT,
+	CIDADE VARCHAR(MAX)
+)
+
+CREATE TABLE ##TB1
+(
+	ID INT
+)
+
+INSERT INTO ##TB VALUES (1,'SÃO PAULO')
+INSERT INTO ##TB VALUES (2,'RIO DE JANEIRO')
+INSERT INTO ##TB VALUES (3,'SAOPAULO')
+INSERT INTO ##TB VALUES (4,'RIODEJANEIRO')
+INSERT INTO ##TB VALUES (5,'SAO PAULO')
+
+INSERT INTO ##TB1 VALUES (1)
+INSERT INTO ##TB1 VALUES (2)
+INSERT INTO ##TB1 VALUES (3)
+INSERT INTO ##TB1 VALUES (4)
+INSERT INTO ##TB1 VALUES (5)
+
+SELECT 
+* 
+FROM 
+##TB	A
+INNER JOIN
+##TB1	B	
+ON A.ID = B.ID
+AND
+(A.CIDADE LIKE '%Sao Paulo%' OR A.CIDADE LIKE '%Saopaulo%') -- Não diferencia maiusculas de minusculas / com ou sem cedilha.
+
+------------------------------------------
+-- BASE DE CLIENTES PF VIA BASES DO NÚCLEO
+------------------------------------------
+
+SELECT	DISTINCT
+		RTRIM(LTRIM(SUBSTRING(A.NUMCPFCNPJ,1,9) + SUBSTRING(A.NUMCPFCNPJ,14,2))) CPF
+INTO	-- DROP TABLE
+	#TMP005
+FROM 
+PRODD000.DBO.TB_BRA_CHV_CLI AS A WITH(NOLOCK)
+INNER JOIN 
+PRODD000.dbo.TB_VME_CAR_CLI	AS B WITH(NOLOCK) ON	A.IND_CLI			= B.IND_CLI
+													AND
+													A.TIP_CLI			= 'PF'	
+INNER JOIN
+PRODD000.dbo.TB_VME_CAR_STA AS C WITH(NOLOCK) ON	B.NUM_CAR_CRD		= C.NUM_CAR_CRD
+													AND	
+													COALESCE(C.CD_BLQ_CAR,'')+COALESCE(C.CD_MTV_BLQ_CAR,'')	IN ('XW','','C','XS')
+													AND 
+													B.IND_TTR			= 'T'
+													AND 
+													B.TIP_CLI			= 'PF'
+													AND 
+													B.[FLG_RMS ]		= 0
+													
+													
+													
+													
+SELECT	COUNT(*) 
+FROM	PRODD000.DBO.TB_VME_CAR_STA AS C WITH(NOLOCK)
+WHERE	COALESCE(C.CD_BLQ_CAR,'')+COALESCE(C.CD_MTV_BLQ_CAR,'')	IN ('XW')
+													
+------------------------------------------
+-- CALCULO DE IDADE DO CLIENTE
+------------------------------------------													
+																								
+DATEDIFF(DAY,DAT_NSC,GETDATE())/365 IDADE
+
+------------------------------------------
+-- ENRIQUECE E-MAIL
+------------------------------------------	
+
+UPDATE	[TABELA_COM_EMAIL]
+SET		[E-MAIL] = B.EMAIL
+FROM 
+	[TABELA_COM_EMAIL]								AS A WITH(NOLOCK)
+INNER JOIN 
+	BBCD000.dbo.DBM_TB_REPOSITORIOEMAIL				AS B WITH(NOLOCK)
+	ON 
+	A.CPF_CNPJ =  B.CPF
+	
+------------------------------------------------
+-- BASE DE RETORNO ( QUEM RECEBEU SMS / E-MAIL )
+------------------------------------------------	
+	
+SELECT 
+TOP 100 * 
+FROM 
+BBCD000.dbo.DBM_TB_RETORNOMLG WITH(NOLOCK)	
+
+------------------------------------------------------------
+-- Flag_overlimit diferente por titularidade dentro da conta
+------------------------------------------------------------
+
+-- AMOSTRA
+CREATE TABLE #TEMPO
+(	CAMPO1 VARCHAR(MAX),	-- CONTA
+	CAMPO2 VARCHAR(MAX),    -- TITULARIDADE
+	CAMPO3 VARCHAR(MAX))	-- OVERLIMIT
+	
+INSERT INTO #TEMPO VALUES ('1','T','2')	
+INSERT INTO #TEMPO VALUES ('1','A','2')
+INSERT INTO #TEMPO VALUES ('1','A','2')	
+
+INSERT INTO #TEMPO VALUES ('2','T','1')	
+INSERT INTO #TEMPO VALUES ('2','A','2')
+INSERT INTO #TEMPO VALUES ('2','A','2')
+
+INSERT INTO #TEMPO VALUES ('3','T','3')
+
+SELECT
+CAMPO1,
+COUNT(DISTINCT(CAMPO3))
+INTO
+#TMP0
+FROM
+#TEMPO
+WHERE
+CAMPO1 IN
+(	-- SOMENTE CONTAS COM DUPLICAÇÃO EM FUNÇÃO DE CARTÕES
+	SELECT
+	CAMPO1
+	FROM
+	#TEMPO
+	GROUP BY
+	CAMPO1
+	HAVING(COUNT(CAMPO1)) > 1
+)	
+GROUP BY
+CAMPO1
+HAVING COUNT(DISTINCT(CAMPO3)) > 1 -- FILTRA SOMENTE QUEM POSSUI MAIS DE UMA FLAG DE OVERLIMIT POR CONTA
+
+SELECT 
+COUNT(DISTINCT(CAMPO1)) 
+FROM 
+#TMP0
+
+
+------------------------------------------------------------
+-- TRATA CPF / CNPJ
+------------------------------------------------------------
+
+TABELA: TB_BRA_CHV_CLI
+CPF:	SUBSTRING(NUMCPFCNPJ,10,4) = '0000' THEN SUBSTRING(NUMCPFCNPJ,1,9) + SUBSTRING(NUMCPFCNPJ,14,2)
+CNPJ:	SUBSTRING(NUMCPFCNPJ,2,14) 
+
+------------------------------------------------------------
+-- TRAZ CNPJ / CARTÃO 
+------------------------------------------------------------													
+
+--- BASE INICIAL
+SELECT 
+A.*,
+B.CD_CLIENTE_TTLAR
+INTO -- DROP TABLE
+#TMP_FINAL
+FROM
+BBCD000.dbo.DBM_TB_BASECAMP		A	WITH(NOLOCK)
+INNER JOIN
+BBCD000.dbo.DBM_TB_DADOSCONTA	B	WITH(NOLOCK)	ON	A.NUM_CNT_CAR = B.NUM_CNT_CAR
+														AND	
+														COD_PRD IN ('KCB401','MCB401','VCB401')
+
+
+
+SELECT
+B.CPF,
+A.CARTAO,
+A.COD_PRD,
+A.NUM_CAR_CRD,
+A.FL_STATUS
+INTO -- DROP TABLE
+#TMP_FINAL_2
+FROM
+#TMP_FINAL							A
+INNER JOIN
+BBCD000.dbo.DBM_TB_DADOSCLIENTE		B	WITH(NOLOCK) ON A.CD_CLIENTE_TTLAR = B.CD_CLIENTE
+
+
+
+SELECT
+A.CPF,
+A.CARTAO,
+A.NUM_CAR_CRD,
+A.COD_PRD,
+A.FL_STATUS,
+ISNULL(B.CD_BLQ_CAR,'')+ISNULL(B.CD_MTV_BLQ_CAR,'')		STATUS_CARTAO
+INTO -- DROP TABLE
+#TMP_FINAL_3
+FROM
+#TMP_FINAL_2					A
+INNER JOIN
+PRODD000.dbo.TB_VME_CAR_STA		B WITH(NOLOCK)			ON A.NUM_CAR_CRD = B.NUM_CAR_CRD
+
+
+
+SELECT 
+CPF			CNPJ,
+CARTAO,
+FL_STATUS,
+COD_PRD		[CÓDIGO DE PRODUTO],
+STATUS_CARTAO
+FROM 
+#TMP_FINAL_3 
+
+------------------------------------------------------------
+-- TRATA STRING BUSCANDO CARACTERE '|'
+------------------------------------------------------------	
+
+SUBSTRING(CAMPO,CHARINDEX('|',CAMPO)+1,13)
+
+------------------------------------------------------------
+-- CRUZA POR CARTAO, COM DIFERENÇA DE DATAS ATRELADO
+------------------------------------------------------------
+
+	CREATE TABLE ##TB1 (CARTAO_NC CHAR(16), DT_REF_TRANS DATETIME)
+	INSERT ##TB1 VALUES ('111','2018-01-01')
+	INSERT ##TB1 VALUES ('222','2018-01-01')
+	INSERT ##TB1 VALUES ('333','2018-01-01')
+	INSERT ##TB1 VALUES ('444','2018-01-01')
+	INSERT ##TB1 VALUES ('555','2018-01-01')
+	
+	
+	CREATE TABLE ##TB2 (CARTAO_NC CHAR(16), DT_REF_TRANS DATETIME)
+	INSERT ##TB2 VALUES ('111','2018-01-02')
+	INSERT ##TB2 VALUES ('222','2018-01-02')
+	INSERT ##TB2 VALUES ('333','2018-01-02')
+	INSERT ##TB2 VALUES ('444','2018-01-02')
+	INSERT ##TB2 VALUES ('555','2018-01-03')
+	
+	SELECT
+	A.*
+	FROM
+	##TB1	A
+	INNER JOIN
+	##TB2	B	ON A.CARTAO_NC = B.CARTAO_NC AND DATEDIFF(DAY,A.DT_REF_TRANS,B.DT_REF_TRANS) = 1
+		
+------------------------------------------------------------
+-- EXEMPLO DE CASE WHEN
+------------------------------------------------------------	
+  
+	SELECT
+	A.*,
+	A.NOME_PRODUTO		VAR1,
+	CASE 
+		WHEN BANDEIRA+' '+TIPO IN ('ELO NANQUIM') 		THEN 'http://usecartao.bradesco/aelonanq'
+		WHEN BANDEIRA+' '+TIPO IN ('ELO GRAFITE') 		THEN 'http://usecartao.bradesco/aelograf'
+		WHEN BANDEIRA+' '+TIPO IN ('ELO MAIS')	  		THEN 'http://usecartao.bradesco/aelomais'
+		WHEN BANDEIRA+' '+TIPO IN ('ELO INTERNACIONAL')	THEN 'http://usecartao.bradesco/aelointer'
+		WHEN BANDEIRA+' '+TIPO IN ('ELO PLUS')			THEN 'http://usecartao.bradesco/aeloplus'
+		ELSE												 'www.banco.bradesco/cartoes/beneficios'
+	END 
+						VAR2,
+	'' 					VAR3,
+	B.DT_DESB
+	INTO
+	#TMP1
+	FROM
+	BBCD000.DBO.DBM_TB_BASECAMP		A	WITH(NOLOCK)
+	INNER JOIN
+	BBCD000.dbo.DBM_TB_STATUS_CONTA	B	WITH(NOLOCK)	ON A.NUM_CNT_CAR = B.NUM_CNT_CAR
+	
+----------------------------------------
+-- EXEMPLO DE DELETE POR DIA DA SEMANA 
+----------------------------------------
+	
+DELETE FROM DBM_TB_AGENDA WHERE PACOTE = '6327' AND DATENAME(DW,DT_PROG) IN ('TUESDAY','WEDNESDAY')
+
+----------------------------------------
+-- BLOQUEADOS POR RENEGOCIAÇÃO
+----------------------------------------
+
+	SELECT 
+		NUM_CNT_CAR,
+		NUM_CAR_CRD,	
+		DMOVTO
+	INTO -- DROP TABLE
+		##bloqRenDivida
+	FROM 
+		PRODD000.dbo.TB_VME_CAR_STA		A	WITH(NOLOCK)						
+	INNER JOIN
+	(
+		SELECT
+		CODBLOQ,
+		REASON
+		FROM
+		BBCD000.dbo.DBM_TB_CDBLOQUEIO	WITH(NOLOCK)
+		WHERE
+		CD_BLOQ IN (131,107)
+	)	B	
+		ON	LTRIM(RTRIM(A.CD_BLQ_CAR))+''+LTRIM(RTRIM(A.CD_MTV_BLQ_CAR)) = B.CODBLOQ 
+			AND
+			LTRIM(RTRIM(A.CD_MTV_CNC_CAR))								 = LTRIM(RTRIM(B.REASON))
+					
+----------------------------------------------------			
+----------------------------------------------------			
+-- AMOSTRA de contagem e soma para o transacional --
+----------------------------------------------------
+----------------------------------------------------
+
+CREATE TABLE #DBM_VW_TRANS
+(
+CARTAO			VARCHAR(16),	-- CONTA
+DT_REF_TRANS	DATETIME,		-- TITULARIDADE
+MES_REF 		VARCHAR(MAX),	-- OVERLIMIT
+VL_CVT_TRANS	DECIMAL(18,2)
+)								
+	
+	
+	
+INSERT INTO #DBM_VW_TRANS VALUES ('1111111111111111','2019-03-17','201903',500)	
+INSERT INTO #DBM_VW_TRANS VALUES ('2222222222222222','2019-03-17','201903',250)	
+INSERT INTO #DBM_VW_TRANS VALUES ('2222222222222222','2019-03-18','201903',150)	
+INSERT INTO #DBM_VW_TRANS VALUES ('3333333333333333','2019-03-19','201903',180)	
+INSERT INTO #DBM_VW_TRANS VALUES ('3333333333333333','2019-03-20','201903',300)	
+INSERT INTO #DBM_VW_TRANS VALUES ('4444444444444444','2019-03-20','201903',555)	
+
+
+
+SELECT		DT_REF_TRANS,
+			COUNT(*)			QTD,
+			SUM(VL_CVT_TRANS)	VL_CVT_TRANS
+FROM		#DBM_VW_TRANS
+GROUP BY	DT_REF_TRANS
+ORDER BY	DT_REF_TRANS			
+			
+			
+----------------------------------------------------
+----------------------------------------------------			
+--- CONTAGENS DAS BASES ----------------------------
+----------------------------------------------------
+----------------------------------------------------
+SELECT COUNT(CPF) QTD1,				COUNT(DISTINCT(CPF)) QTD2				FROM BBCD000.dbo.DBM_TB_DADOSCLIENTE		WITH(NOLOCK)
+-- 105.735.683	105.735.683
+SELECT COUNT(CD_CLIENTE) QTD1,		COUNT(DISTINCT(CD_CLIENTE)) QTD2		FROM BBCD000.dbo.DBM_TB_FONE				WITH(NOLOCK)	
+-- 35.189.563	35.189.563
+SELECT COUNT(CD_CLIENTE_TTLAR) QTD1,COUNT(DISTINCT(CD_CLIENTE_TTLAR)) QTD2	FROM BBCD000.dbo.DBM_TB_DADOSCONTA			WITH(NOLOCK)
+-- 62.941.481	33.303.623 ******************************
+SELECT COUNT(NUM_CAR_CRD) QTD1, 	COUNT(DISTINCT(NUM_CAR_CRD)) QTD2 		FROM BBCD000.dbo.DBM_TB_BASECAMP_CAD		WITH(NOLOCK)
+-- 83.308.393	83.308.393
+SELECT COUNT(NUM_CAR_CRD) QTD1, 	COUNT(DISTINCT(NUM_CAR_CRD)) QTD2 		FROM BBCD000.dbo.DBM_TB_DADOSCARTAO			WITH(NOLOCK)
+-- 83.794.324	83.794.324
+SELECT COUNT(CPF) QTD1, COUNT(DISTINCT(CPF)) QTD2							FROM BBCD000.dbo.DBM_TB_DESBAPP				WITH(NOLOCK)
+-- 88.391	75.027
+
+
+
+----------------------------------------------------
+----------------------------------------------------			
+--- DROP CONTRAINTS --------------------------------
+----------------------------------------------------
+----------------------------------------------------
+
+
+
+ALTER TABLE DBM_TB_FIDELIZEDFOLHAS	DROP CONSTRAINT FK_FIDFORASACOLA;
+ALTER TABLE DBM_TB_SOURCECODE		DROP CONSTRAINT FK_CDFIDELIZE;
+ALTER TABLE DBM_TB_FIDELIZE			DROP CONSTRAINT PK_CD_FIDELIZE;
+-- Perform more appropriate alters
+ALTER TABLE DBM_TB_FIDELIZE ADD FOREIGN KEY (PK_CD_FIDELIZE) 
+    REFERENCES [dbo.DBM_TB_FIDELIZE](CD_FIDELIZE);
+    
+    
+    
+----------------------------------------------------
+----------------------------------------------------			
+--- CD_TRANS SAQUE NO ATM --------------------------
+--- USAM O ATM PARA SAQUE NO CRÉDITO OU NO DÉBITO --
+----------------------------------------------------
+----------------------------------------------------    
+		 	
+	
+
+SELECT		NUM_CNT_CAR,
+			SUM(VL_CVT_TRANS)	VL_CVT_TRANS
+INTO		#TMP 
+FROM		DBM_VW_TRANS
+WHERE		CD_TRANS	IN ('0703','0700','0709','0708','0706','0705','0704','0702') 
+			AND		
+			MES_REF		IN ('201905','201904','201903','201902','201901','201812')
+GROUP BY	NUM_CNT_CAR
+				
